@@ -35,6 +35,7 @@
 #include <stdarg.h>
 #include <linux/cramfs_fs.h>
 #include <zlib.h>
+#include <stdint.h>
 
 /* Exit codes used by mkfs-type programs */
 #define MKFS_OK          0	/* No errors */
@@ -43,9 +44,6 @@
 
 /* The kernel only supports PAD_SIZE of 0 and 512. */
 #define PAD_SIZE 512
-
-/* The kernel assumes PAGE_CACHE_SIZE as block size. */
-#define PAGE_CACHE_SIZE (4096)
 
 /*
  * The longest filename component to allow for in the input directory tree.
@@ -69,10 +67,10 @@
  */
 #define MAXFSLEN ((((1 << CRAMFS_OFFSET_WIDTH) - 1) << 2) /* offset */ \
 		  + (1 << CRAMFS_SIZE_WIDTH) - 1 /* filesize */ \
-		  + (1 << CRAMFS_SIZE_WIDTH) * 4 / PAGE_CACHE_SIZE /* block pointers */ )
+		  + (1 << CRAMFS_SIZE_WIDTH) * 4 / blksize /* block pointers */ )
 
 static const char *progname = "mkcramfs";
-static unsigned int blksize = PAGE_CACHE_SIZE;
+static unsigned int blksize;
 static long total_blocks = 0, total_nodes = 1; /* pre-count the root node */
 static int image_length = 0;
 
@@ -123,9 +121,10 @@ static void usage(int status)
 {
 	FILE *stream = status ? stderr : stdout;
 
-	fprintf(stream, "usage: %s [-h] [-e edition] [-i file] [-n name] dirname outfile\n"
+	fprintf(stream, "usage: %s [-h] [-b blksize] [-e edition] [-i file] [-n name] dirname outfile\n"
 		" -h         print this help\n"
 		" -E         make all warnings errors (non-zero exit status)\n"
+		" -b blksize blocksize to use\n"
 		" -e edition set edition number (part of fsid)\n"
 		" -i file    insert a file image into the filesystem (requires >= 2.4.0)\n"
 		" -n name    set name of cramfs filesystem\n"
@@ -335,14 +334,17 @@ static unsigned int parse_directory(struct entry *root_entry, const char *name, 
 				}
 			}
 		} else if (S_ISLNK(st.st_mode)) {
+			int len;
 			entry->uncompressed = malloc(entry->size);
 			if (!entry->uncompressed) {
 				die(MKFS_ERROR, 1, "malloc failed");
 			}
-			if (readlink(path, entry->uncompressed, entry->size) < 0) {
+			len = readlink(path, entry->uncompressed, entry->size);
+			if (len < 0) {
 				warn_skip = 1;
 				continue;
 			}
+			entry->size = len;
 		} else if (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode)) {
 			/* maybe we should skip sockets */
 			entry->size = 0;
@@ -693,18 +695,27 @@ int main(int argc, char **argv)
 	int c;			/* for getopt */
 	char *ep;		/* for strtoul */
 
+	blksize = sysconf(_SC_PAGESIZE);
 	total_blocks = 0;
 
 	if (argc)
 		progname = argv[0];
 
 	/* command line options */
-	while ((c = getopt(argc, argv, "hEe:i:n:psvz")) != EOF) {
+	while ((c = getopt(argc, argv, "hEb:e:i:n:psvz")) != EOF) {
 		switch (c) {
 		case 'h':
 			usage(MKFS_OK);
 		case 'E':
 			opt_errors = 1;
+			break;
+		case 'b':
+			errno = 0;
+			blksize = strtoul(optarg, &ep, 10);
+			if (errno || optarg[0] == '\0' || *ep != '\0')
+				usage(MKFS_USAGE);
+			if (blksize < 512 || (blksize & (blksize - 1)))
+				die(MKFS_ERROR, 0, "invalid blocksize: %u", blksize);
 			break;
 		case 'e':
 			errno = 0;
@@ -768,8 +779,8 @@ int main(int argc, char **argv)
 
 	if (fslen_ub > MAXFSLEN) {
 		fprintf(stderr,
-			"warning: estimate of required size (upper bound) is %LdMB, but maximum image size is %uMB, we might die prematurely\n",
-			fslen_ub >> 20,
+			"warning: estimate of required size (upper bound) is %jdMB, but maximum image size is %uMB, we might die prematurely\n",
+			(intmax_t) (fslen_ub >> 20),
 			MAXFSLEN >> 20);
 		fslen_ub = MAXFSLEN;
 	}
@@ -807,18 +818,18 @@ int main(int argc, char **argv)
 	}
 
 	offset = write_directory_structure(root_entry->child, rom_image, offset);
-	printf("Directory data: %d bytes\n", offset);
+	printf("Directory data: %zd bytes\n", offset);
 
 	offset = write_data(root_entry, rom_image, offset);
 
 	/* We always write a multiple of blksize bytes, so that
 	   losetup works. */
 	offset = ((offset - 1) | (blksize - 1)) + 1;
-	printf("Everything: %d kilobytes\n", offset >> 10);
+	printf("Everything: %zd kilobytes\n", offset >> 10);
 
 	/* Write the superblock now that we can fill in all of the fields. */
 	write_superblock(root_entry, rom_image+opt_pad, offset);
-	printf("Super block: %d bytes\n", sizeof(struct cramfs_super));
+	printf("Super block: %zd bytes\n", sizeof(struct cramfs_super));
 
 	/* Put the checksum in. */
 	crc = crc32(0L, Z_NULL, 0);
@@ -836,7 +847,7 @@ int main(int argc, char **argv)
 		die(MKFS_ERROR, 1, "write failed");
 	}
 	if (offset != written) {
-		die(MKFS_ERROR, 0, "ROM image write failed (wrote %d of %d bytes)", written, offset);
+		die(MKFS_ERROR, 0, "ROM image write failed (wrote %d of %d bytes): No space left on device?", written, offset);
 	}
 
 	/* (These warnings used to come at the start, but they scroll off the

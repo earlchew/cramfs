@@ -65,7 +65,8 @@
 #define FSCK_LIBRARY     128	/* Shared library error */
 
 #define PAD_SIZE 512
-#define PAGE_CACHE_SIZE (4096)
+
+#define PAGE_CACHE_SIZE  page_size
 
 static const char *progname = "cramfsck";
 
@@ -92,8 +93,10 @@ static char read_buffer[ROMBUFFERSIZE * 2];
 static unsigned long read_buffer_block = ~0UL;
 
 /* Uncompressing data structures... */
-static char outbuffer[PAGE_CACHE_SIZE*2];
+static char *outbuffer;
 static z_stream stream;
+
+static size_t page_size;
 
 /* Prototypes */
 static void expand_fs(char *, struct cramfs_inode *);
@@ -661,8 +664,14 @@ int main(int argc, char **argv)
 	int start = 0;
 	size_t length;
 
+	page_size = sysconf(_SC_PAGESIZE);
+
 	if (argc)
 		progname = argv[0];
+
+	outbuffer = malloc(page_size * 2);
+	if (!outbuffer)
+		die(FSCK_ERROR, 1, "failed to allocate outbuffer");
 
 	/* command line options */
 	while ((c = getopt(argc, argv, "hx:v")) != EOF) {
