@@ -66,7 +66,7 @@
 
 #define PAD_SIZE 512
 
-#define PAGE_CACHE_SIZE  page_size
+#define PAGE_CACHE_SIZE  blksize
 
 static const char *progname = "cramfsck";
 
@@ -85,18 +85,16 @@ static unsigned long end_dir = 0;	/* end of the directory structure */
 static unsigned long start_data = ~0UL;	/* start of the data (256 MB = max) */
 static unsigned long end_data = 0;	/* end of the data */
 
-/* Guarantee access to at least 8kB at a time */
-#define ROMBUFFER_BITS	13
-#define ROMBUFFERSIZE	(1 << ROMBUFFER_BITS)
-#define ROMBUFFERMASK	(ROMBUFFERSIZE-1)
-static char read_buffer[ROMBUFFERSIZE * 2];
+/* Guarantee access to at least two blocks at a time */
+#define ROMBUFFERSIZE	(2 * blksize)
+static char *read_buffer;
 static unsigned long read_buffer_block = ~0UL;
 
 /* Uncompressing data structures... */
 static char *outbuffer;
 static z_stream stream;
 
-static size_t page_size;
+static size_t blksize;
 
 /* Prototypes */
 static void expand_fs(char *, struct cramfs_inode *);
@@ -290,13 +288,13 @@ static void print_node(char type, struct cramfs_inode *i, char *name)
  */
 static void *romfs_read(unsigned long offset)
 {
-	unsigned int block = offset >> ROMBUFFER_BITS;
+	unsigned int block = offset / ROMBUFFERSIZE;
 	if (block != read_buffer_block) {
 		read_buffer_block = block;
-		lseek(fd, block << ROMBUFFER_BITS, SEEK_SET);
+		lseek(fd, block * ROMBUFFERSIZE, SEEK_SET);
 		read(fd, read_buffer, ROMBUFFERSIZE * 2);
 	}
-	return read_buffer + (offset & ROMBUFFERMASK);
+	return read_buffer + (offset % ROMBUFFERSIZE);
 }
 
 static struct cramfs_inode *cramfs_iget(struct cramfs_inode * i)
@@ -356,7 +354,7 @@ static int uncompress_block(void *src, int len)
 	err = inflate(&stream, Z_FINISH);
 	if (err != Z_STREAM_END) {
 		die(FSCK_UNCORRECTED, 0, "decompression error %p(%d): %s",
-		    zError(err), src, len);
+		    src, len, zError(err));
 	}
 	return stream.total_out;
 }
@@ -663,21 +661,26 @@ int main(int argc, char **argv)
 	int c;			/* for getopt */
 	int start = 0;
 	size_t length;
+        char *ep;
 
-	page_size = sysconf(_SC_PAGESIZE);
+	blksize = sysconf(_SC_PAGESIZE);
 
 	if (argc)
 		progname = argv[0];
 
-	outbuffer = malloc(page_size * 2);
-	if (!outbuffer)
-		die(FSCK_ERROR, 1, "failed to allocate outbuffer");
-
 	/* command line options */
-	while ((c = getopt(argc, argv, "hx:v")) != EOF) {
+	while ((c = getopt(argc, argv, "hb:x:v")) != EOF) {
 		switch (c) {
 		case 'h':
 			usage(FSCK_OK);
+                case 'b':
+                        errno = 0;
+                        blksize = strtoul(optarg, &ep, 10);
+                        if (errno || optarg[0] == '\0' || *ep != '\0')
+                                usage(FSCK_USAGE);
+                        if (blksize < 512 || (blksize & (blksize - 1)))
+                                die(FSCK_ERROR, 0, "invalid blocksize: %u", blksize);
+                        break;
 		case 'x':
 #ifdef INCLUDE_FS_TESTS
 			opt_extract = 1;
@@ -695,6 +698,14 @@ int main(int argc, char **argv)
 	if ((argc - optind) != 1)
 		usage(FSCK_USAGE);
 	filename = argv[optind];
+
+	read_buffer = malloc(ROMBUFFERSIZE * 2);
+	if (!read_buffer)
+		die(FSCK_ERROR, 1, "failed to allocate read_buffer");
+
+	outbuffer = malloc(blksize * 2);
+	if (!outbuffer)
+		die(FSCK_ERROR, 1, "failed to allocate outbuffer");
 
 	test_super(&start, &length);
 	test_crc(start);
