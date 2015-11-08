@@ -108,6 +108,7 @@ static void usage(int status)
 	fprintf(stream, "usage: %s [-hv] [-x dir] file\n"
 		" -h         print this help\n"
 		" -x dir     extract into dir\n"
+		" -b blksize blocksize to use\n"
 		" -v         be more verbose\n"
 		" file       file to test\n", progname);
 
